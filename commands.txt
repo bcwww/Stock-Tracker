@@ -1,0 +1,6 @@
+1. Open Windows PowerShell
+2. Copy the below command and paste(right click) into PowerShell: cd C:\Users\XXX\Desktop\Stock_pattern\
+3. Copy the below command and paste(right click) into PowerShell: python server.py
+4. Open a browser, enter the below url: http://localhost:8765/
+5. Press "Load US symbols", wait for message "7116 symbols loaded. Choose a batch size, then scan" before proceeding
+6. Set parameters then press List all US matches (IT WILL TAKE A WHILE! Wait for around 6 minutes)
