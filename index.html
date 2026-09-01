@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rising Plateau Screener</title>
+  <style>
+    :root { color-scheme:dark; --bg:#0a1020; --panel:#111b32; --line:#263656; --text:#eef3ff; --muted:#a9b5cd; --accent:#62e6a8; --warn:#f5c35a; }
+    * { box-sizing:border-box; } body { margin:0; font-family:Inter,system-ui,sans-serif; background:radial-gradient(circle at 20% 0,#18325b,var(--bg) 45%); color:var(--text); }
+    main { max-width:1100px; margin:auto; padding:48px 24px; } h1 { margin:0 0 10px; font-size:clamp(2rem,5vw,3.5rem); } p { color:var(--muted); line-height:1.55; }
+    .panel { background:rgba(17,27,50,.9); border:1px solid var(--line); border-radius:16px; padding:22px; margin-top:24px; }
+    .controls { display:grid; grid-template-columns:1fr auto auto; gap:10px; } .scan-controls { display:grid; grid-template-columns:1fr 130px auto; gap:10px; margin-top:12px; } .price-controls { display:grid; grid-template-columns:180px 180px 230px 230px; gap:10px; margin-top:12px; }
+    input { width:100%; min-width:0; background:#091226; color:var(--text); border:1px solid var(--line); border-radius:9px; padding:12px; font-size:1rem; } label { display:block; font-size:.86rem; color:var(--muted); margin-bottom:6px; }
+    button { border:0; border-radius:9px; padding:12px 16px; color:#062015; background:var(--accent); font-weight:700; cursor:pointer; } button.secondary { background:#dce6fc; } button:disabled { opacity:.55; cursor:wait; }
+    #status { min-height:24px; margin:16px 0 0; } .warning { color:var(--warn); font-size:.9rem; } table { width:100%; border-collapse:collapse; margin-top:18px; } th,td { text-align:left; padding:12px 8px; border-bottom:1px solid var(--line); vertical-align:top; } th { color:var(--muted); font-weight:600; } .tag { color:var(--accent); font-variant-numeric:tabular-nums; } small { color:var(--muted); }
+    @media(max-width:700px) { .controls,.scan-controls,.price-controls { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Rising Plateau Screener</h1>
+    <p>Find U.S.-listed stocks where the first peak before the five-day low is followed by an exact-price plateau above that peak.</p>
+    <section class="panel">
+      <p id="build" style="margin:0 0 14px;font-size:.8rem">Checking local server version...</p>
+      <div class="controls">
+        <input id="symbol" aria-label="Ticker symbol" value="AAPL" placeholder="Ticker, e.g. AAPL" />
+        <button id="check">Check one stock</button>
+        <button class="secondary" id="loadSymbols">Load U.S. symbols</button>
+      </div>
+      <div class="scan-controls">
+        <div><label for="symbols">Symbols to scan (comma-separated; blank = loaded U.S. universe)</label><input id="symbols" placeholder="AAPL, MSFT, NVDA" /></div>
+        <div><label for="limit">Max symbols</label><input id="limit" value="100" type="number" min="1" max="15000" /></div>
+        <div style="align-self:end"><button id="scan">Scan batch</button></div>
+      </div>
+      <div class="price-controls">
+        <div><label for="minPrice">Minimum latest price (optional)</label><input id="minPrice" type="number" min="0" step="0.01" placeholder="No minimum" /></div>
+        <div><label for="maxPrice">Maximum latest price (optional)</label><input id="maxPrice" type="number" min="0" step="0.01" placeholder="No maximum" /></div>
+        <div><label for="minPriorDayVolume">Minimum prior-day volume (optional)</label><input id="minPriorDayVolume" type="number" min="0" step="1" placeholder="Shares traded" /></div>
+        <div><label for="maxPriorDayVolume">Maximum prior-day volume (optional)</label><input id="maxPriorDayVolume" type="number" min="0" step="1" placeholder="Shares traded" /></div>
+      </div>
+      <div style="margin-top:12px"><button id="allMatches">List all U.S. matches</button> <button class="secondary" id="diagnose">Run connection diagnostic</button></div>
+      <p id="status" role="status"></p>
+      <p class="warning">All filters are inclusive. Prior-day volume is the total number of shares traded during the previous trading session. Free endpoints may be delayed or rate-limited.</p>
+    </section>
+    <section class="panel"><div id="results">No scan results yet.</div></section>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    let marketSymbols = [];
+    const api = async path => { const response = await fetch(path); const data = await response.json(); if (!response.ok || data.error) throw new Error(data.error || 'Request failed'); return data; };
+    const fmt = unix => `${new Date(unix * 1000).toLocaleString([], { timeZone:'America/New_York', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })} ET`;
+    const money = amount => `$${Math.abs(amount).toFixed(2)}`;
+    function boundsQuery() { const query = new URLSearchParams(); if ($('minPrice').value.trim()) query.set('minPrice', $('minPrice').value.trim()); if ($('maxPrice').value.trim()) query.set('maxPrice', $('maxPrice').value.trim()); if ($('minPriorDayVolume').value.trim()) query.set('minPriorDayVolume', $('minPriorDayVolume').value.trim()); if ($('maxPriorDayVolume').value.trim()) query.set('maxPriorDayVolume', $('maxPriorDayVolume').value.trim()); return query.toString(); }
+    function withBounds(path) { const query = boundsQuery(); return query ? `${path}${path.includes('?') ? '&' : '?'}${query}` : path; }
+    function moveText(dayChange) { if (!dayChange || dayChange.direction === 'unavailable') return 'Prior day unavailable'; if (dayChange.direction === 'unchanged') return `Unchanged (${money(dayChange.previousClose)})`; const label = dayChange.direction === 'up' ? 'Up' : 'Down'; const sign = dayChange.direction === 'up' ? '+' : '-'; return `${label} ${sign}${money(dayChange.change)}<br><small>vs prior close ${money(dayChange.previousClose)}</small>`; }
+    function render(results, scanned) {
+      if (!results.length) { $('results').textContent = `No matches across ${scanned} checked symbol(s).`; return; }
+      $('results').innerHTML = `<table><thead><tr><th>Symbol</th><th>Five-day low</th><th>Closest peak before low</th><th>Later higher plateau</th><th>Latest</th><th>Vs prior trading day</th><th>Prior-day volume</th></tr></thead><tbody>${results.map(row => { const match = row.matches[0]; const volume = row.dayChange.priorDayVolume === null ? 'Unavailable' : row.dayChange.priorDayVolume.toLocaleString(); return `<tr><td><strong>${row.symbol}</strong></td><td><span class="tag">${money(match.low.price)}</span><br><small>${fmt(match.low.time)}</small></td><td><span class="tag">${money(match.peak.price)}</span><br><small>${fmt(match.peak.time)}</small></td><td><span class="tag">${money(match.plateau.price)}</span><br><small>${fmt(match.plateau.start)} to ${fmt(match.plateau.end)}<br>(${match.plateau.points} points)</small></td><td>${money(row.latest)}</td><td>${moveText(row.dayChange)}</td><td>${volume}</td></tr>`; }).join('')}</tbody></table>`;
+    }
+    async function run(path, button) { button.disabled = true; $('status').textContent = 'Fetching delayed intraday data...'; try { const data = await api(path); const results = data.results || (data.result ? [data.result] : []); const checked = data.scanned ?? 1; render(results, checked); $('status').textContent = `Done: ${checked} symbol(s) checked, ${results.length} match(es), in ${(data.elapsedSeconds ?? 0).toFixed(2)} seconds.`; } catch (error) { $('status').textContent = `Could not complete scan: ${error.message}`; } finally { button.disabled = false; } }
+    $('check').onclick = () => run(withBounds(`/api/check?symbol=${encodeURIComponent($('symbol').value.trim())}`), $('check'));
+    $('scan').onclick = () => { const supplied = $('symbols').value.trim(); if (!supplied && !marketSymbols.length) { $('status').textContent = 'Load U.S. symbols first, or enter a comma-separated list.'; return; } const source = supplied ? `symbols=${encodeURIComponent(supplied)}` : 'universe=1'; run(withBounds(`/api/scan?${source}&limit=${encodeURIComponent($('limit').value)}`), $('scan')); };
+    $('allMatches').onclick = () => { $('status').textContent = 'Loading the U.S. universe and scanning every symbol. This can take many minutes...'; run(withBounds('/api/scan?universe=1&limit=15000'), $('allMatches')); };
+    $('loadSymbols').onclick = async () => { const button = $('loadSymbols'); button.disabled = true; $('status').textContent = 'Loading U.S.-listed symbols...'; try { marketSymbols = (await api('/api/symbols')).symbols; $('status').textContent = `${marketSymbols.length.toLocaleString()} symbols loaded. Choose a batch size, then scan.`; } catch (error) { $('status').textContent = `Could not load symbols: ${error.message}`; } finally { button.disabled = false; } };
+    $('diagnose').onclick = async () => { const button = $('diagnose'); button.disabled = true; $('status').textContent = 'Testing data connections...'; try { const data = await api('/api/diagnose'); $('status').textContent = `${data.results.map(x => x.ok ? `${x.source}: OK (HTTP ${x.status})` : `${x.source}: BLOCKED - ${x.error}`).join(' | ')}. Python: ${data.python}`; } catch (error) { $('status').textContent = `Could not run diagnostic: ${error.message}`; } finally { button.disabled = false; } };
+    api('/api/health').then(data => { $('build').textContent = `Server: ${data.build} - ${data.serverFile}`; }).catch(() => { $('build').textContent = 'Server version could not be verified.'; });
+  </script>
+</body>
+</html>
