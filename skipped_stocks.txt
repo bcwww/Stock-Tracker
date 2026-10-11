@@ -1,0 +1,53 @@
+Screening completed: 2026-10-11 23:35:54+08:00 (Asia/Taipei)
+Stocks skipped because 65-day volume history was unavailable or incomplete.
+Missing sessions = shortfall below 65 returned sessions + selected sessions with invalid/missing volume.
+Unknown means the response could not be evaluated. Entire dates omitted by Yahoo cannot be detected without an exchange calendar.
+
+Symbol: APMD
+Error: VolumeHistoryError: Only 50 of 65 required completed sessions returned
+Completed sessions returned: 50
+Selected sessions (maximum 65): 50
+Session shortfall: 15
+Sessions with missing/invalid volume: 0
+Missing usable sessions (of 65): 15
+Missing/invalid volume dates (New York): None
+Average daily volume from available data: 546,392.00 shares/session
+Valid sessions used for this average: 50
+Partial-history average only; stock remains excluded from the 65-session screening rule.
+
+Symbol: ATTO
+Error: VolumeHistoryError: Only 47 of 65 required completed sessions returned
+Completed sessions returned: 47
+Selected sessions (maximum 65): 47
+Session shortfall: 18
+Sessions with missing/invalid volume: 0
+Missing usable sessions (of 65): 18
+Missing/invalid volume dates (New York): None
+Average daily volume from available data: 451,770.21 shares/session
+Valid sessions used for this average: 47
+Partial-history average only; stock remains excluded from the 65-session screening rule.
+
+Symbol: BCCQ
+Error: VolumeHistoryError: Only 49 of 65 required completed sessions returned
+Completed sessions returned: 49
+Selected sessions (maximum 65): 49
+Session shortfall: 16
+Sessions with missing/invalid volume: 0
+Missing usable sessions (of 65): 16
+Missing/invalid volume dates (New York): None
+Average daily volume from available data: 219,744.90 shares/session
+Valid sessions used for this average: 49
+Partial-history average only; stock remains excluded from the 65-session screening rule.
+
+Symbol: BIOT
+Error: VolumeHistoryError: Only 55 of 65 required completed sessions returned
+Completed sessions returned: 55
+Selected sessions (maximum 65): 55
+Session shortfall: 10
+Sessions with missing/invalid volume: 0
+Missing usable sessions (of 65): 10
+Missing/invalid volume dates (New York): None
+Average daily volume from available data: 741,340.00 shares/session
+Valid sessions used for this average: 55
+Partial-history average only; stock remains excluded from the 65-session screening rule.
+

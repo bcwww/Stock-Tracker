@@ -9,10 +9,12 @@
     * { box-sizing:border-box; } body { margin:0; font-family:Inter,system-ui,sans-serif; background:radial-gradient(circle at 20% 0,#18325b,var(--bg) 45%); color:var(--text); }
     main { max-width:1100px; margin:auto; padding:48px 24px; } h1 { margin:0 0 10px; font-size:clamp(2rem,5vw,3.5rem); } p { color:var(--muted); line-height:1.55; }
     .panel { background:rgba(17,27,50,.9); border:1px solid var(--line); border-radius:16px; padding:22px; margin-top:24px; }
-    .controls { display:grid; grid-template-columns:1fr auto auto; gap:10px; } .scan-controls { display:grid; grid-template-columns:1fr 130px auto; gap:10px; margin-top:12px; } .price-controls { display:grid; grid-template-columns:180px 180px 230px 230px; gap:10px; margin-top:12px; }
+    .controls { display:grid; grid-template-columns:1fr auto auto; gap:10px; } .scan-controls { display:grid; grid-template-columns:1fr 130px auto; gap:10px; margin-top:12px; } .price-controls { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; margin-top:12px; }
     input { width:100%; min-width:0; background:#091226; color:var(--text); border:1px solid var(--line); border-radius:9px; padding:12px; font-size:1rem; } label { display:block; font-size:.86rem; color:var(--muted); margin-bottom:6px; }
     button { border:0; border-radius:9px; padding:12px 16px; color:#062015; background:var(--accent); font-weight:700; cursor:pointer; } button.secondary { background:#dce6fc; } button:disabled { opacity:.55; cursor:wait; }
     #status { min-height:24px; margin:16px 0 0; } .warning { color:var(--warn); font-size:.9rem; } table { width:100%; border-collapse:collapse; margin-top:18px; } th,td { text-align:left; padding:12px 8px; border-bottom:1px solid var(--line); vertical-align:top; } th { color:var(--muted); font-weight:600; } .tag { color:var(--accent); font-variant-numeric:tabular-nums; } small { color:var(--muted); }
+    #results { overflow-x:auto; }
+    .symbol-link { color:var(--accent); text-underline-offset:3px; } .symbol-link:hover { color:var(--text); } .symbol-link:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
     @media(max-width:700px) { .controls,.scan-controls,.price-controls { grid-template-columns:1fr; } }
   </style>
 </head>
@@ -33,37 +35,60 @@
         <div style="align-self:end"><button id="scan">Scan batch</button></div>
       </div>
       <div class="price-controls">
-        <div><label for="minPrice">Minimum latest price (optional)</label><input id="minPrice" type="number" min="0" step="0.01" placeholder="No minimum" /></div>
-        <div><label for="maxPrice">Maximum latest price (optional)</label><input id="maxPrice" type="number" min="0" step="0.01" placeholder="No maximum" /></div>
-        <div><label for="minPriorDayVolume">Minimum prior-day volume (optional)</label><input id="minPriorDayVolume" type="number" min="0" step="1" placeholder="Shares traded" /></div>
-        <div><label for="maxPriorDayVolume">Maximum prior-day volume (optional)</label><input id="maxPriorDayVolume" type="number" min="0" step="1" placeholder="Shares traded" /></div>
+        <div><label for="minPrice">Minimum latest price</label><input id="minPrice" type="number" min="0" step="0.01" placeholder="No minimum" /></div>
+        <div><label for="maxPrice">Maximum latest price</label><input id="maxPrice" type="number" min="0" step="0.01" placeholder="No maximum" /></div>
+        <div><label for="minPriorDayVolume">Minimum prior-day volume</label><input id="minPriorDayVolume" type="number" min="0" step="1" placeholder="Shares traded" /></div>
+        <div><label for="maxPriorDayVolume">Maximum prior-day volume</label><input id="maxPriorDayVolume" type="number" min="0" step="1" placeholder="Shares traded" /></div>
       </div>
+      <p>Confirmed matches require 65-day average daily volume of at least <strong>100,000 shares</strong>. Stocks with fewer than 65 sessions are also shown, marked as incomplete for review.</p>
       <div style="margin-top:12px"><button id="allMatches">List all U.S. matches</button> <button class="secondary" id="diagnose">Run connection diagnostic</button></div>
       <p id="status" role="status"></p>
-      <p class="warning">All filters are inclusive. Prior-day volume is the total number of shares traded during the previous trading session. Free endpoints may be delayed or rate-limited.</p>
+      <p class="warning">All filters are inclusive. Prior-day volume is the total number of shares traded during the previous trading session. The 65-day average uses the latest 65 completed trading sessions; today is included 15 minutes after market close. Free endpoints may be delayed or rate-limited.</p>
     </section>
     <section class="panel"><div id="results">No scan results yet.</div></section>
   </main>
   <script>
     const $ = id => document.getElementById(id);
     let marketSymbols = [];
+    const expectedBuild = '2026-10-11-incomplete-history-results';
+    async function verifyServer() {
+      const data = await api('/api/health');
+      if (data.build !== expectedBuild) throw new Error('An older or incompatible server is running. Stop server.py with Ctrl+C, restart it from the Stock-Tracker folder, and refresh this page. Expected server: ' + expectedBuild + '; running: ' + data.build);
+      return data;
+    }
     const api = async path => { const response = await fetch(path); const data = await response.json(); if (!response.ok || data.error) throw new Error(data.error || 'Request failed'); return data; };
     const fmt = unix => `${new Date(unix * 1000).toLocaleString([], { timeZone:'America/New_York', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' })} ET`;
     const money = amount => `$${Math.abs(amount).toFixed(2)}`;
+    function marketWatchLink(symbol) {
+      const link = document.createElement('a');
+      link.className = 'symbol-link';
+      link.href = `https://www.marketwatch.com/investing/stock/${encodeURIComponent(symbol.toLowerCase())}?mod=search_symbol`;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = symbol;
+      return link.outerHTML;
+    }
     function boundsQuery() { const query = new URLSearchParams(); if ($('minPrice').value.trim()) query.set('minPrice', $('minPrice').value.trim()); if ($('maxPrice').value.trim()) query.set('maxPrice', $('maxPrice').value.trim()); if ($('minPriorDayVolume').value.trim()) query.set('minPriorDayVolume', $('minPriorDayVolume').value.trim()); if ($('maxPriorDayVolume').value.trim()) query.set('maxPriorDayVolume', $('maxPriorDayVolume').value.trim()); return query.toString(); }
     function withBounds(path) { const query = boundsQuery(); return query ? `${path}${path.includes('?') ? '&' : '?'}${query}` : path; }
     function moveText(dayChange) { if (!dayChange || dayChange.direction === 'unavailable') return 'Prior day unavailable'; if (dayChange.direction === 'unchanged') return `Unchanged (${money(dayChange.previousClose)})`; const label = dayChange.direction === 'up' ? 'Up' : 'Down'; const sign = dayChange.direction === 'up' ? '+' : '-'; return `${label} ${sign}${money(dayChange.change)}<br><small>vs prior close ${money(dayChange.previousClose)}</small>`; }
+    function volumeCell(row) {
+      if (row.volumeHistoryIncomplete) {
+        const average = row.availableAverageVolume == null ? 'Unavailable' : row.availableAverageVolume.toLocaleString(undefined, { maximumFractionDigits:2 });
+        return `<span class="warning">Incomplete history: ${row.returnedVolumeSessions}/65 sessions</span><br>Partial average: ${average}<br><small>${row.availableAverageSessions} valid sessions; 65-day volume rule not verified</small>`;
+      }
+      return row.averageVolume65Day == null ? 'Unavailable' : row.averageVolume65Day.toLocaleString(undefined, { maximumFractionDigits:2 }) + '<br><small>' + row.averageVolumeSessions + ' sessions</small>';
+    }
     function render(results, scanned) {
       if (!results.length) { $('results').textContent = `No matches across ${scanned} checked symbol(s).`; return; }
-      $('results').innerHTML = `<table><thead><tr><th>Symbol</th><th>Five-day low</th><th>Closest peak before low</th><th>Later higher plateau</th><th>Latest</th><th>Vs prior trading day</th><th>Prior-day volume</th></tr></thead><tbody>${results.map(row => { const match = row.matches[0]; const volume = row.dayChange.priorDayVolume === null ? 'Unavailable' : row.dayChange.priorDayVolume.toLocaleString(); return `<tr><td><strong>${row.symbol}</strong></td><td><span class="tag">${money(match.low.price)}</span><br><small>${fmt(match.low.time)}</small></td><td><span class="tag">${money(match.peak.price)}</span><br><small>${fmt(match.peak.time)}</small></td><td><span class="tag">${money(match.plateau.price)}</span><br><small>${fmt(match.plateau.start)} to ${fmt(match.plateau.end)}<br>(${match.plateau.points} points)</small></td><td>${money(row.latest)}</td><td>${moveText(row.dayChange)}</td><td>${volume}</td></tr>`; }).join('')}</tbody></table>`;
+      $('results').innerHTML = `<table><thead><tr><th>Symbol</th><th>Five-day low</th><th>Closest peak before low</th><th>Later higher plateau</th><th>Latest</th><th>Vs prior trading day</th><th>Prior-day volume</th><th>Average daily volume (65 days)</th></tr></thead><tbody>${results.map(row => { const match = row.matches[0]; const volume = row.dayChange.priorDayVolume === null ? 'Unavailable' : row.dayChange.priorDayVolume.toLocaleString(); return `<tr><td><strong>${marketWatchLink(row.symbol)}</strong>${row.volumeHistoryIncomplete ? '<br><span class="warning">Incomplete history</span>' : ''}</td><td><span class="tag">${money(match.low.price)}</span><br><small>${fmt(match.low.time)}</small></td><td><span class="tag">${money(match.peak.price)}</span><br><small>${fmt(match.peak.time)}</small></td><td><span class="tag">${money(match.plateau.price)}</span><br><small>${fmt(match.plateau.start)} to ${fmt(match.plateau.end)}<br>(${match.plateau.points} points)</small></td><td>${money(row.latest)}</td><td>${moveText(row.dayChange)}</td><td>${volume}</td><td>${volumeCell(row)}</td></tr>`; }).join('')}</tbody></table>`;
     }
-    async function run(path, button) { button.disabled = true; $('status').textContent = 'Fetching delayed intraday data...'; try { const data = await api(path); const results = data.results || (data.result ? [data.result] : []); const checked = data.scanned ?? 1; render(results, checked); $('status').textContent = `Done: ${checked} symbol(s) checked, ${results.length} match(es), in ${(data.elapsedSeconds ?? 0).toFixed(2)} seconds.`; } catch (error) { $('status').textContent = `Could not complete scan: ${error.message}`; } finally { button.disabled = false; } }
+    async function run(path, button) { button.disabled = true; $('status').textContent = 'Fetching delayed intraday data...'; try { await verifyServer(); const data = await api(path); const results = data.results || (data.result ? [data.result] : []); const checked = data.scanned ?? 1; render(results, checked); const incomplete = results.filter(row => row.volumeHistoryIncomplete).length; $('status').textContent = `Done: ${checked} symbol(s) checked, ${results.length - incomplete} confirmed match(es), ${incomplete} incomplete-history stock(s) shown for review, in ${(data.elapsedSeconds ?? 0).toFixed(2)} seconds. Saved results.txt and skipped_stocks.txt in the project folder.`; if (data.averageVolumeUnavailable) $('status').textContent += ` ${data.averageVolumeUnavailable} stock(s) logged with unavailable or incomplete volume history; ${incomplete} of these are shown for review. See skipped_stocks.txt for details.`; } catch (error) { $('status').textContent = `Could not complete scan: ${error.message}`; } finally { button.disabled = false; } }
     $('check').onclick = () => run(withBounds(`/api/check?symbol=${encodeURIComponent($('symbol').value.trim())}`), $('check'));
     $('scan').onclick = () => { const supplied = $('symbols').value.trim(); if (!supplied && !marketSymbols.length) { $('status').textContent = 'Load U.S. symbols first, or enter a comma-separated list.'; return; } const source = supplied ? `symbols=${encodeURIComponent(supplied)}` : 'universe=1'; run(withBounds(`/api/scan?${source}&limit=${encodeURIComponent($('limit').value)}`), $('scan')); };
     $('allMatches').onclick = () => { $('status').textContent = 'Loading the U.S. universe and scanning every symbol. This can take many minutes...'; run(withBounds('/api/scan?universe=1&limit=15000'), $('allMatches')); };
     $('loadSymbols').onclick = async () => { const button = $('loadSymbols'); button.disabled = true; $('status').textContent = 'Loading U.S.-listed symbols...'; try { marketSymbols = (await api('/api/symbols')).symbols; $('status').textContent = `${marketSymbols.length.toLocaleString()} symbols loaded. Choose a batch size, then scan.`; } catch (error) { $('status').textContent = `Could not load symbols: ${error.message}`; } finally { button.disabled = false; } };
     $('diagnose').onclick = async () => { const button = $('diagnose'); button.disabled = true; $('status').textContent = 'Testing data connections...'; try { const data = await api('/api/diagnose'); $('status').textContent = `${data.results.map(x => x.ok ? `${x.source}: OK (HTTP ${x.status})` : `${x.source}: BLOCKED - ${x.error}`).join(' | ')}. Python: ${data.python}`; } catch (error) { $('status').textContent = `Could not run diagnostic: ${error.message}`; } finally { button.disabled = false; } };
-    api('/api/health').then(data => { $('build').textContent = `Server: ${data.build} - ${data.serverFile}`; }).catch(() => { $('build').textContent = 'Server version could not be verified.'; });
+    verifyServer().then(data => { $('build').textContent = `Server: ${data.build} - ${data.serverFile}`; }).catch(error => { $('build').textContent = error.message; $('build').classList.add('warning'); });
   </script>
 </body>
 </html>

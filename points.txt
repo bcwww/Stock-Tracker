@@ -7,6 +7,7 @@ past 65 day avg volume > 100k股
 
 
 NEW requirements
-1. New pattern: Find minimum in past 5 days, let the first peak(def. as point where gradient go from positive to negative) before the minimum be P, if there exists a plateau whose price is higher than P, than pattern exists
-2. 前一天成交股數下限
-3. 前一天成交價錢區間設定
+1. 過去三個月平均交易量在n股以上
+2. For every stock in the result, add a link of said stock in marketwatch (ok)
+3. Make a list of stock names after every screen
+

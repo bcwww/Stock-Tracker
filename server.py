@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import concurrent.futures
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 import io
 import json
 import math
 import sys
+import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -22,22 +24,44 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent
 # 8000 is commonly occupied by old local development servers. A dedicated port
 # makes it obvious that this prototype, rather than a stale process, is serving
 # the page.
 PORT = 8765
-BUILD_ID = "2026-09-01-closest-peak-volume-range-9"
+BUILD_ID = "2026-10-11-incomplete-history-results"
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=5d&interval=5m&includePrePost=false" # change data point interval here
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; StockPatternPrototype/1.0)", "Accept": "application/json"}
 TEXT_HEADERS = {"User-Agent": "StockPatternPrototype contact@example.com", "Accept": "text/plain"}
 NEW_YORK = ZoneInfo("America/New_York")
+SCREENING_TIMEZONE = ZoneInfo("Asia/Taipei")
+AVERAGE_VOLUME_SESSIONS = 65
+MINIMUM_AVERAGE_VOLUME = 100_000
+AVERAGE_VOLUME_CACHE: dict = {}
+AVERAGE_VOLUME_LOCK = threading.Lock()
+REPORT_LOCK = threading.Lock()
 
 
 class DataSourceError(RuntimeError):
     """An actionable error returned to the browser when free data is unreachable."""
+
+
+class VolumeHistoryError(ValueError):
+    def __init__(self, message: str, **details):
+        super().__init__(message)
+        self.details = details
+
+
+def volume_skip_detail(symbol: str, error: Exception) -> dict:
+    causes = []
+    current = error
+    while current is not None:
+        causes.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__
+    return {"symbol": symbol, "error": " | caused by: ".join(causes),
+            **getattr(error, "details", {})}
 
 
 def fetch_json(url: str) -> dict:
@@ -196,6 +220,102 @@ def prior_day_volume_bounds(query: dict[str, list[str]]) -> tuple[int | None, in
     return lower, upper
 
 
+def average_daily_volume(symbol: str, now: datetime) -> dict:
+    """Average the latest 65 completed daily bars; cache successes."""
+    now = now.astimezone(NEW_YORK)
+    with AVERAGE_VOLUME_LOCK:
+        cached = AVERAGE_VOLUME_CACHE.get(symbol)
+        if cached and cached[0] == now.date() and now.timestamp() < cached[1]:
+            return cached[2].copy()
+    query = urllib.parse.urlencode({
+        "range": "6mo",
+        "interval": "1d", "includePrePost": "false",
+    })
+    encoded = urllib.parse.quote(symbol, safe=".-^")
+    payload = fetch_json(f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?{query}")
+    chart_response = payload["chart"]
+    if chart_response.get("error"):
+        raise VolumeHistoryError(f"Yahoo chart error: {json.dumps(chart_response['error'])}")
+    if not chart_response.get("result"):
+        raise VolumeHistoryError("Yahoo returned no chart result; session counts are unknown.")
+    chart = chart_response["result"][0]
+    meta = chart["meta"]
+    regular_end = meta.get("currentTradingPeriod", {}).get("regular", {}).get("end")
+    # Allow delayed daily volume to settle after the actual session close,
+    # including early closes supplied by Yahoo's trading-period metadata.
+    settled_at = regular_end + 15 * 60 if regular_end is not None else None
+    expires = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    if settled_at is not None and now.timestamp() < settled_at:
+        expires = min(expires, settled_at)
+    timestamps = chart.get("timestamp", [])
+    quotes = chart.get("indicators", {}).get("quote") or [{}]
+    volumes = quotes[0].get("volume") or []
+    daily = {}
+    for index, stamp in enumerate(timestamps):
+        day = datetime.fromtimestamp(stamp, NEW_YORK).date()
+        if day > now.date() or day.weekday() >= 5:
+            continue
+        if day == now.date():
+            if settled_at is None or datetime.fromtimestamp(regular_end, NEW_YORK).date() != day or now.timestamp() < settled_at:
+                continue
+        volume = volumes[index] if index < len(volumes) else None
+        daily[day] = volume
+    recent_days = sorted(daily)[-AVERAGE_VOLUME_SESSIONS:]
+    recent = [daily[day] for day in recent_days]
+    invalid_days = [day.isoformat() for day in recent_days
+                    if not isinstance(daily[day], (int, float)) or not math.isfinite(daily[day]) or daily[day] < 0]
+    shortfall = max(0, AVERAGE_VOLUME_SESSIONS - len(recent))
+    if shortfall or invalid_days:
+        valid_volumes = [volume for volume in recent
+                         if isinstance(volume, (int, float)) and math.isfinite(volume) and volume >= 0]
+        available_average = sum(valid_volumes) / len(valid_volumes) if valid_volumes else None
+        reasons = []
+        if shortfall:
+            reasons.append(f"Only {len(recent)} of 65 required completed sessions returned")
+        if invalid_days:
+            reasons.append(f"Missing or invalid volume in {len(invalid_days)} selected session(s)")
+        raise VolumeHistoryError("; ".join(reasons), returnedSessions=len(daily),
+                                 selectedSessions=len(recent), sessionShortfall=shortfall,
+                                 invalidVolumeSessions=len(invalid_days), invalidVolumeDates=invalid_days,
+                                 missingSessions=shortfall + len(invalid_days),
+                                 availableAverageVolume=available_average,
+                                 availableAverageSessions=len(valid_volumes))
+    result = {"averageVolume65Day": sum(recent) / AVERAGE_VOLUME_SESSIONS, "averageVolumeSessions": AVERAGE_VOLUME_SESSIONS}
+    with AVERAGE_VOLUME_LOCK:
+        AVERAGE_VOLUME_CACHE[symbol] = (now.date(), expires, result)
+    return result.copy()
+
+
+def filter_average_volume(results: list[dict], diagnostics: list[dict] | None = None) -> tuple[list[dict], int]:
+    now = datetime.now(NEW_YORK)
+
+    def evaluate(row):
+        try:
+            summary = average_daily_volume(row["symbol"], now)
+        except Exception as error:
+            detail = volume_skip_detail(row["symbol"], error)
+            if detail.get("sessionShortfall", 0) > 0:
+                return {**row, "volumeHistoryIncomplete": True,
+                        "availableAverageVolume": detail.get("availableAverageVolume"),
+                        "availableAverageSessions": detail.get("availableAverageSessions", 0),
+                        "returnedVolumeSessions": detail["selectedSessions"]}, detail
+            return None, detail
+        if summary["averageVolume65Day"] < MINIMUM_AVERAGE_VOLUME:
+            return None, None
+        return {**row, **summary}, None
+
+    passed, unavailable = [], 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+        for row, skipped in pool.map(evaluate, results):
+            if skipped is not None:
+                unavailable += 1
+                if diagnostics is not None:
+                    diagnostics.append(skipped)
+            if row is not None:
+                passed.append(row)
+    return passed, unavailable
+
+
 def day_change(points: list[dict]) -> dict:
     """Compare the latest available price with the prior trading session's last close."""
     latest = points[-1]
@@ -284,6 +404,68 @@ def us_symbols() -> list[str]:
     return sorted(set(symbols))
 
 
+def save_screen_results(results: list[dict], skipped: list[dict] | None = None) -> None:
+    """Replace the last screening report with a complete, timestamped symbol list."""
+    completed_at = datetime.now(SCREENING_TIMEZONE).isoformat(sep=" ", timespec="seconds")
+    symbols = []
+    seen = set()
+    for result in results:
+        if result["symbol"] in seen:
+            continue
+        seen.add(result["symbol"])
+        line = result["symbol"]
+        if result.get("volumeHistoryIncomplete"):
+            average = result.get("availableAverageVolume")
+            average_text = f"{average:,.2f}" if average is not None else "Unavailable"
+            line += (f" [INCOMPLETE HISTORY: {result['returnedVolumeSessions']}/65 sessions returned; "
+                     f"partial average: {average_text} shares/session over {result['availableAverageSessions']} valid sessions; "
+                     "other criteria passed, 65-day volume rule NOT verified]")
+        symbols.append(line)
+    content = f"Screening completed: {completed_at} (Asia/Taipei)\n\n"
+    content += "\n".join(symbols) + "\n" if symbols else "No symbols passed the screening.\n"
+    log = f"Screening completed: {completed_at} (Asia/Taipei)\n"
+    log += "Stocks skipped because 65-day volume history was unavailable or incomplete.\n"
+    log += "Missing sessions = shortfall below 65 returned sessions + selected sessions with invalid/missing volume.\n"
+    log += "Unknown means the response could not be evaluated. Entire dates omitted by Yahoo cannot be detected without an exchange calendar.\n\n"
+    for entry in skipped or []:
+        log += f"Symbol: {entry['symbol']}\nError: {' '.join(entry['error'].split())}\n"
+        for label, key in (("Completed sessions returned", "returnedSessions"),
+                           ("Selected sessions (maximum 65)", "selectedSessions"),
+                           ("Session shortfall", "sessionShortfall"),
+                           ("Sessions with missing/invalid volume", "invalidVolumeSessions"),
+                           ("Missing usable sessions (of 65)", "missingSessions")):
+            log += f"{label}: {entry.get(key, 'Unknown')}\n"
+        log += f"Missing/invalid volume dates (New York): {', '.join(entry['invalidVolumeDates']) or 'None'}\n" if "invalidVolumeDates" in entry else "Missing/invalid volume dates (New York): Unknown\n"
+        available_average = entry.get("availableAverageVolume")
+        if available_average is not None:
+            log += f"Average daily volume from available data: {available_average:,.2f} shares/session\n"
+            log += f"Valid sessions used for this average: {entry['availableAverageSessions']}\n"
+            log += "Partial-history average only; stock remains excluded from the 65-session screening rule.\n"
+        else:
+            log += "Average daily volume from available data: Unavailable\n"
+            log += f"Valid sessions used for this average: {entry.get('availableAverageSessions', 'Unknown')}\n"
+        log += "\n"
+    if not skipped:
+        log += "No stocks skipped for unavailable or incomplete 65-day volume history.\n"
+    with REPORT_LOCK:
+        write_report("results.txt", content)
+        write_report("skipped_stocks.txt", log)
+
+
+def write_report(filename: str, content: str) -> None:
+    # Use a unique temporary file so overlapping scans cannot mix their output,
+    # and a failed write does not erase the previous completed report.
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=ROOT, delete=False) as report:
+            temporary_path = Path(report.name)
+            report.write(content)
+        temporary_path.replace(ROOT / filename)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def make_handler():
     class Handler(SimpleHTTPRequestHandler):
         def do_GET(self):
@@ -327,9 +509,14 @@ def make_handler():
                     minimum_volume, maximum_volume = prior_day_volume_bounds(query)
                     started = time.perf_counter()
                     result = scan_symbol(symbol, minimum_price, maximum_price, minimum_volume, maximum_volume)
-                    self.send_json({"result": result, "checked": symbol, "elapsedSeconds": time.perf_counter() - started})
+                    skipped = []
+                    results, unavailable = filter_average_volume([result] if result else [], skipped)
+                    save_screen_results(results, skipped)
+                    self.send_json({"result": results[0] if results else None, "averageVolumeUnavailable": unavailable, "checked": symbol, "elapsedSeconds": time.perf_counter() - started})
                 except ValueError as error:
                     self.send_json({"error": str(error)}, 400)
+                except OSError:
+                    self.send_json({"error": "Screening completed, but results.txt or skipped_stocks.txt could not be saved in the project folder. Check folder permissions and whether the file is locked."}, 500)
                 return
             if parsed.path == "/api/scan":
                 query = urllib.parse.parse_qs(parsed.query)
@@ -354,16 +541,22 @@ def make_handler():
                         ):
                             if result:
                                 results.append(result)
+                    skipped = []
+                    results, unavailable = filter_average_volume(results, skipped)
+                    save_screen_results(results, skipped)
                     self.send_json({
                         "results": results,
                         "scanned": len(symbols),
                         "limited": limit,
+                        "averageVolumeUnavailable": unavailable,
                         "elapsedSeconds": time.perf_counter() - started,
                     })
                 except DataSourceError as error:
                     self.send_json({"error": str(error)}, 502)
                 except ValueError as error:
                     self.send_json({"error": str(error)}, 400)
+                except OSError:
+                    self.send_json({"error": "Screening completed, but results.txt or skipped_stocks.txt could not be saved in the project folder. Check folder permissions and whether the file is locked."}, 500)
                 except Exception:
                     self.send_json({"error": "Could not retrieve market data. The free source may be temporarily rate-limited; try a smaller batch later."}, 502)
                 return
